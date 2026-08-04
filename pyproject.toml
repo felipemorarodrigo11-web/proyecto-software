@@ -1,0 +1,25 @@
+[project]
+name = "pdf-upload-api"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "pydantic-settings>=2.14.2",
+    "pypdf",
+    "python-multipart",
+    "tinydb>=4.8.2",
+    "uvicorn[standard]",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
