@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
-from app.repositories.document_repo import DocumentRepository
+from app.repositories.document_repo import (
+    DocumentRepository,
+    DuplicateChecksumError,
+)
 from app.schemas.document import DocumentResponse
 from app.services.pdf_service import process_pdf_in_memory
 
@@ -55,6 +58,27 @@ async def get_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
     return doc
+
+
+@router.put("/{doc_id}", response_model=DocumentResponse)
+async def update_document(
+    doc_id: str,
+    file: UploadFile = File(...),
+    repo: DocumentRepository = Depends(get_repository),
+):
+    parsed_data = await process_pdf_in_memory(file)
+
+    try:
+        updated_doc = repo.update_if_checksum_absent(doc_id, parsed_data)
+    except DuplicateChecksumError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="El archivo ya existe en la base de datos.",
+        ) from exc
+
+    if updated_doc is None:
+        raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    return updated_doc
 
 
 @router.delete("/{doc_id}", status_code=204)

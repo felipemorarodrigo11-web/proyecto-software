@@ -134,6 +134,65 @@ class TestUploadAndCRUDEndpoints:
         assert response.status_code == 409
         assert response.json()["detail"] == "El archivo ya existe en la base de datos."
 
+    async def test_update_document_replaces_pdf(
+        self,
+        client,
+        small_valid_pdf,
+        second_valid_pdf,
+    ):
+        async with client as ac:
+            upload_res = await ac.post(
+                "/documents/upload",
+                files={"file": ("original.pdf", small_valid_pdf, "application/pdf")},
+            )
+            original = upload_res.json()
+
+            update_res = await ac.put(
+                f"/documents/{original['id']}",
+                files={"file": ("actualizado.pdf", second_valid_pdf, "application/pdf")},
+            )
+
+        assert update_res.status_code == 200
+        updated = update_res.json()
+        assert updated["id"] == original["id"]
+        assert updated["created_at"] == original["created_at"]
+        assert updated["filename"] == "actualizado.pdf"
+        assert updated["checksum"] != original["checksum"]
+        assert updated["updated_at"] is not None
+
+    async def test_update_with_duplicate_pdf_returns_409(
+        self,
+        client,
+        small_valid_pdf,
+        second_valid_pdf,
+    ):
+        async with client as ac:
+            first = await ac.post(
+                "/documents/upload",
+                files={"file": ("primero.pdf", small_valid_pdf, "application/pdf")},
+            )
+            await ac.post(
+                "/documents/upload",
+                files={"file": ("segundo.pdf", second_valid_pdf, "application/pdf")},
+            )
+            response = await ac.put(
+                f"/documents/{first.json()['id']}",
+                files={"file": ("duplicado.pdf", second_valid_pdf, "application/pdf")},
+            )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "El archivo ya existe en la base de datos."
+
+    async def test_update_missing_document_returns_404(self, client, small_valid_pdf):
+        async with client as ac:
+            response = await ac.put(
+                "/documents/id-inexistente",
+                files={"file": ("documento.pdf", small_valid_pdf, "application/pdf")},
+            )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Documento no encontrado."
+
     async def test_crud_operations(self, client, second_valid_pdf):
         async with client as ac:
             upload_res = await ac.post(

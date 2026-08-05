@@ -9,6 +9,10 @@ from tinydb.storages import Storage
 from app.core.config import settings
 
 
+class DuplicateChecksumError(Exception):
+    pass
+
+
 class DocumentRepository:
     def __init__(
         self,
@@ -44,6 +48,29 @@ class DocumentRepository:
         }
         self.db.insert(record)
         return record
+
+    def update_if_checksum_absent(
+        self,
+        doc_id: str,
+        data: dict,
+    ) -> Optional[dict]:
+        """Reemplaza un documento si existe y el nuevo checksum está disponible."""
+        with self._lock:
+            current = self.get_by_id(doc_id)
+            if current is None:
+                return None
+
+            duplicate = self.get_by_checksum(data["checksum"])
+            if duplicate is not None and duplicate["id"] != doc_id:
+                raise DuplicateChecksumError
+
+            updated = {
+                **current,
+                **data,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.db.update(updated, self.Doc.id == doc_id)
+            return updated
 
     def get_all(self) -> List[dict]:
         return self.db.all()

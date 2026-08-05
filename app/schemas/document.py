@@ -10,3 +10,4 @@ class DocumentResponse(BaseModel):
     checksum: str
     size: int
     created_at: str
+    updated_at: str | None = None
