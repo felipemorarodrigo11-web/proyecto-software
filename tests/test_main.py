@@ -1,26 +1,32 @@
 from io import BytesIO
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from pypdf import PdfWriter
+from tinydb.storages import MemoryStorage
+
 from app.main import app
 from app.repositories.document_repo import DocumentRepository
 from app.routers.documents import get_repository
+from app.services.pdf_service import process_pdf_in_memory
+
 
 @pytest.fixture(autouse=True)
 def override_repo_dependency():
-    test_repo = DocumentRepository("test_db.json")
-    test_repo.db.truncate()
-
+    test_repo = DocumentRepository(storage=MemoryStorage)
     app.dependency_overrides[get_repository] = lambda: test_repo
     yield test_repo
-
-    test_repo.db.truncate()
     app.dependency_overrides.clear()
+    test_repo.close()
+
 
 @pytest.fixture
 def client():
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://test")
+
 
 @pytest.fixture
 def small_valid_pdf() -> bytes:
@@ -31,6 +37,7 @@ def small_valid_pdf() -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+
 @pytest.fixture
 def second_valid_pdf() -> bytes:
     writer = PdfWriter()
@@ -40,6 +47,21 @@ def second_valid_pdf() -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+
+@pytest.mark.asyncio
+class TestPdfService:
+    async def test_process_pdf_with_none_filename_raises_400(self):
+        upload = MagicMock()
+        upload.filename = None
+        upload.read = AsyncMock(return_value=b"")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await process_pdf_in_memory(upload)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "El archivo debe ser un documento PDF."
+
+
 @pytest.mark.asyncio
 class TestHealthEndpoint:
     async def test_health_returns_200_and_ok(self, client):
@@ -47,6 +69,7 @@ class TestHealthEndpoint:
             response = await ac.get("/health")
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
+
 
 @pytest.mark.asyncio
 class TestUploadAndCRUDEndpoints:
@@ -59,15 +82,31 @@ class TestUploadAndCRUDEndpoints:
         assert response.status_code == 400
         assert response.json()["detail"] == "El archivo debe ser un documento PDF."
 
-    async def test_upload_pdf_exceeding_5mb_returns_400(self, client):
+    async def test_upload_pdf_exceeding_limit_returns_413(self, client):
         oversized = b"%PDF" + b"x" * (5 * 1024 * 1024 + 1)
         async with client as ac:
             response = await ac.post(
                 "/documents/upload",
                 files={"file": ("grande.pdf", oversized, "application/pdf")},
             )
+        assert response.status_code == 413
+        assert "demasiado grande" in response.json()["detail"]
+        assert "5 MB" in response.json()["detail"]
+
+    async def test_upload_corrupt_pdf_returns_400(self, client):
+        async with client as ac:
+            response = await ac.post(
+                "/documents/upload",
+                files={
+                    "file": (
+                        "corrupto.pdf",
+                        b"%PDF-1.4\nesto no es un pdf valido",
+                        "application/pdf",
+                    )
+                },
+            )
         assert response.status_code == 400
-        assert response.json()["detail"] == "El archivo es demasiado grande. El límite es 5 MB."
+        assert response.json()["detail"] == "El archivo PDF es inválido o está corrupto."
 
     async def test_upload_valid_pdf_returns_201(self, client, small_valid_pdf):
         async with client as ac:
@@ -80,6 +119,7 @@ class TestUploadAndCRUDEndpoints:
         assert data["filename"] == "documento.pdf"
         assert "checksum" in data
         assert "id" in data
+        assert "created_at" in data
 
     async def test_upload_duplicate_pdf_returns_409(self, client, small_valid_pdf):
         async with client as ac:

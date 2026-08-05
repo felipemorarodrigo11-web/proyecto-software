@@ -1,7 +1,7 @@
 [project]
 name = "pdf-upload-api"
 version = "0.1.0"
-description = "Add your description here"
+description = "API para carga y CRUD de documentos PDF"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

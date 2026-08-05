@@ -1,46 +1,66 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from app.services.pdf_service import process_pdf_in_memory
+
 from app.repositories.document_repo import DocumentRepository
+from app.schemas.document import DocumentResponse
+from app.services.pdf_service import process_pdf_in_memory
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-def get_repository() -> DocumentRepository:
-    return DocumentRepository()
+_repo: DocumentRepository | None = None
 
-@router.post("/upload", status_code=201)
+
+def get_repository() -> DocumentRepository:
+    global _repo
+    if _repo is None:
+        _repo = DocumentRepository()
+    return _repo
+
+
+def reset_repository() -> None:
+    """Cierra y limpia el singleton (útil en tests o shutdown)."""
+    global _repo
+    if _repo is not None:
+        _repo.close()
+        _repo = None
+
+
+@router.post("/upload", status_code=201, response_model=DocumentResponse)
 async def upload_pdf(
     file: UploadFile = File(...),
-    repo: DocumentRepository = Depends(get_repository)
+    repo: DocumentRepository = Depends(get_repository),
 ):
     parsed_data = await process_pdf_in_memory(file)
 
-    if repo.get_by_checksum(parsed_data["checksum"]):
+    new_doc = repo.create_if_checksum_absent(parsed_data)
+    if new_doc is None:
         raise HTTPException(
             status_code=409,
             detail="El archivo ya existe en la base de datos.",
         )
 
-    new_doc = repo.create(parsed_data)
     return new_doc
 
-@router.get("/")
+
+@router.get("/", response_model=list[DocumentResponse])
 async def list_documents(repo: DocumentRepository = Depends(get_repository)):
     return repo.get_all()
 
-@router.get("/{doc_id}")
+
+@router.get("/{doc_id}", response_model=DocumentResponse)
 async def get_document(
     doc_id: str,
-    repo: DocumentRepository = Depends(get_repository)
+    repo: DocumentRepository = Depends(get_repository),
 ):
     doc = repo.get_by_id(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
     return doc
 
+
 @router.delete("/{doc_id}", status_code=204)
 async def delete_document(
     doc_id: str,
-    repo: DocumentRepository = Depends(get_repository)
+    repo: DocumentRepository = Depends(get_repository),
 ):
     if not repo.delete(doc_id):
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
