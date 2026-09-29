@@ -3,18 +3,13 @@ from io import BytesIO
 
 from fastapi import HTTPException, UploadFile
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import PyPdfError
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.services.upload_service import file_too_large
 
 _CHUNK_SIZE = 64 * 1024
-
-
-def _max_size_label() -> str:
-    mb = settings.MAX_FILE_SIZE / (1024 * 1024)
-    if mb == int(mb):
-        return f"{int(mb)} MB"
-    return f"{mb:.1f} MB"
 
 
 async def _read_with_size_limit(file: UploadFile) -> bytes:
@@ -27,13 +22,7 @@ async def _read_with_size_limit(file: UploadFile) -> bytes:
             break
         total += len(chunk)
         if total > settings.MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=(
-                    "El archivo es demasiado grande. "
-                    f"El límite es {_max_size_label()}."
-                ),
-            )
+            raise file_too_large()
         chunks.append(chunk)
 
     return b"".join(chunks)
@@ -49,7 +38,11 @@ async def process_pdf_in_memory(file: UploadFile) -> dict:
 
     content = await _read_with_size_limit(file)
 
-    if not content.startswith(b"%PDF"):
+    return await run_in_threadpool(_extract_document, filename, content)
+
+
+def _extract_document(filename: str, content: bytes) -> dict:
+    if not content.startswith(b"%PDF-"):
         raise HTTPException(
             status_code=400,
             detail="El archivo debe ser un documento PDF.",
@@ -62,10 +55,10 @@ async def process_pdf_in_memory(file: UploadFile) -> dict:
                 status_code=400,
                 detail="El PDF está cifrado y no se puede procesar.",
             )
-        text = "".join(page.extract_text() or "" for page in reader.pages).strip()
+        text = "\n".join((page.extract_text() or "").strip() for page in reader.pages).strip()
     except HTTPException:
         raise
-    except (PdfReadError, Exception) as exc:
+    except (PyPdfError, ValueError, TypeError, KeyError, IndexError, RecursionError) as exc:
         raise HTTPException(
             status_code=400,
             detail="El archivo PDF es inválido o está corrupto.",

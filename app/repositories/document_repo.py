@@ -1,8 +1,11 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
-from typing import List, Optional
 import uuid
 
+from filelock import FileLock, Timeout
 from tinydb import Query, TinyDB
 from tinydb.storages import Storage
 
@@ -13,75 +16,88 @@ class DuplicateChecksumError(Exception):
     pass
 
 
+class RepositoryBusyError(Exception):
+    pass
+
+
 class DocumentRepository:
-    def __init__(
-        self,
-        db_path: Optional[str] = None,
-        *,
-        storage: Optional[type[Storage]] = None,
-    ):
-        if storage is not None:
-            self.db = TinyDB(storage=storage)
-        else:
-            path = db_path or settings.DB_PATH
-            self.db = TinyDB(path)
-        self.Doc = Query()
+    def __init__(self, db_path: str | None = None, *, storage: type[Storage] | None = None):
         self._lock = Lock()
+        self._memory_db = TinyDB(storage=storage) if storage is not None else None
+        self._path = Path(db_path or settings.DB_PATH).resolve()
+        self._file_lock = FileLock(str(self._path) + ".lock", timeout=settings.DB_LOCK_TIMEOUT)
 
-    def get_by_checksum(self, checksum: str) -> Optional[dict]:
-        results = self.db.search(self.Doc.checksum == checksum)
-        return results[0] if results else None
+    @contextmanager
+    def _transaction(self) -> Iterator[TinyDB]:
+        """Serializa lecturas y escrituras y abre una vista fresca entre procesos.
 
-    def create_if_checksum_absent(self, data: dict) -> Optional[dict]:
-        """Inserta el documento solo si el checksum no existe. Evita duplicados concurrentes."""
+        Abrir TinyDB dentro del bloqueo evita caches obsoletas de consultas e IDs.
+        El archivo .lock contiene coordinación, nunca el PDF recibido.
+        """
         with self._lock:
-            if self.get_by_checksum(data["checksum"]):
+            if self._memory_db is not None:
+                yield self._memory_db
+                return
+            try:
+                with self._file_lock:
+                    with TinyDB(self._path, encoding="utf-8", ensure_ascii=False) as db:
+                        yield db
+            except Timeout as exc:
+                raise RepositoryBusyError("La base de datos está ocupada.") from exc
+
+    def get_by_checksum(self, checksum: str) -> dict | None:
+        with self._transaction() as db:
+            return db.get(Query().checksum == checksum)
+
+    def create_if_checksum_absent(self, data: dict) -> dict | None:
+        with self._transaction() as db:
+            if db.get(Query().checksum == data["checksum"]) is not None:
                 return None
-            return self.create(data)
+            record = {
+                **data,
+                "id": str(uuid.uuid4()),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            db.insert(record)
+            return record
 
     def create(self, data: dict) -> dict:
-        doc_id = str(uuid.uuid4())
-        record = {
-            "id": doc_id,
-            **data,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self.db.insert(record)
+        record = self.create_if_checksum_absent(data)
+        if record is None:
+            raise DuplicateChecksumError
         return record
 
-    def update_if_checksum_absent(
-        self,
-        doc_id: str,
-        data: dict,
-    ) -> Optional[dict]:
-        """Reemplaza un documento si existe y el nuevo checksum está disponible."""
-        with self._lock:
-            current = self.get_by_id(doc_id)
+    def update_if_checksum_absent(self, doc_id: str, data: dict) -> dict | None:
+        with self._transaction() as db:
+            current = db.get(Query().id == doc_id)
             if current is None:
                 return None
-
-            duplicate = self.get_by_checksum(data["checksum"])
+            duplicate = db.get(Query().checksum == data["checksum"])
             if duplicate is not None and duplicate["id"] != doc_id:
                 raise DuplicateChecksumError
-
             updated = {
                 **current,
                 **data,
+                "id": current["id"],
+                "created_at": current["created_at"],
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-            self.db.update(updated, self.Doc.id == doc_id)
+            db.update(updated, Query().id == doc_id)
             return updated
 
-    def get_all(self) -> List[dict]:
-        return self.db.all()
+    def get_all(self) -> list[dict]:
+        with self._transaction() as db:
+            return db.all()
 
-    def get_by_id(self, doc_id: str) -> Optional[dict]:
-        results = self.db.search(self.Doc.id == doc_id)
-        return results[0] if results else None
+    def get_by_id(self, doc_id: str) -> dict | None:
+        with self._transaction() as db:
+            return db.get(Query().id == doc_id)
 
     def delete(self, doc_id: str) -> bool:
-        removed = self.db.remove(self.Doc.id == doc_id)
-        return len(removed) > 0
+        with self._transaction() as db:
+            return bool(db.remove(Query().id == doc_id))
 
     def close(self) -> None:
-        self.db.close()
+        with self._lock:
+            if self._memory_db is not None:
+                self._memory_db.close()
